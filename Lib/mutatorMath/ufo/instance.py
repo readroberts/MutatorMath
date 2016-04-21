@@ -12,6 +12,7 @@ from fontMath.mathGlyph import MathGlyph
 from ufoLib.validators import kerningValidatorReportPairs
 
 import defcon
+import os
 
 class InstanceWriter(object):
     """ 
@@ -37,7 +38,8 @@ class InstanceWriter(object):
         self.ufoVersion = ufoVersion
         self.roundGeometry = roundGeometry
         self.sources = {} 
-        self.muted = dict(kerning=[], info=[], glyphs={})
+        self.muted = dict(kerning=[], info=[], glyphs={})   # muted data in the masters
+        self.mutedGlyphsNames = []                          # muted glyphs in the instance
         self.familyName = None
         self.styleName = None
         self.postScriptFontName = None
@@ -47,6 +49,7 @@ class InstanceWriter(object):
         self.logger=logger
         self._failed = []            # list of glyphnames we could not generate
         self._missingUnicodes = []   # list of glyphnames with missing unicode values
+        self._kerningValidationProblems = []     # list of kerning pairs that failed validation
             
     def setSources(self, sources):
         """ Set a list of sources."""
@@ -54,7 +57,11 @@ class InstanceWriter(object):
 
     def setMuted(self, muted):
         """ Set the mute states. """
-        self.muted = muted
+        self.muted.update(muted)
+
+    def muteGlyph(self, glyphName):
+        """ Mute the generating of this specific glyph. """
+        self.mutedGlyphsNames.append(glyphName)
     
     def setGroups(self, groups, kerningGroupConversionRenameMaps=None):
         """ Copy the groups into our font. """
@@ -81,6 +88,10 @@ class InstanceWriter(object):
     def getFailed(self):
         """ Return the list of glyphnames that failed to generate."""
         return self._failed
+
+    def getKerningErrors(self):
+        """ Return the list of kerning pairs that failed validation. """
+        return self._kerningValidationProblems
 
     def getMissingUnicodes(self):
         """ Return the list of glyphnames with missing unicode values. """
@@ -305,7 +316,6 @@ class InstanceWriter(object):
         glyphMasters = []
         if sources is None:
             # glyph has no special requests, add the default sources
-            #sources = self.sources
             for sourceName, (source, sourceLocation) in self.sources.items():
                 if glyphName in self.muted['glyphs'].get(sourceName, []):
                     # this glyph in this master was muted, so do not add.
@@ -324,8 +334,6 @@ class InstanceWriter(object):
             self._calculateGlyph(glyphObject, instanceLocation, glyphMasters)
         except:
             self._failed.append(glyphName)
-            if self.verbose and self.logger:
-                self.logger.exception("\tGlyph %s failed", glyphName)
     
     def _calculateGlyph(self, targetGlyphObject, instanceLocationObject, glyphMasters):
         """
@@ -361,19 +369,29 @@ class InstanceWriter(object):
     
     def validateKerning(self):
         " Make sure the kerning validates before saving. "
-        self.logger.info("Validating kerning...")
+        self.logger.info("Validating kerning %s", os.path.basename(self.path))
         validates, errors, pairs = kerningValidatorReportPairs(self.font.kerning, self.font.groups)
         if validates:
             return
-        self.logger.info("Warning: removed these invalid kerning pairs:\n\t%s"%"\n\t".join(errors))
         for pair in pairs:
             if pair in self.font.kerning:
                 del self.font.kerning[pair]
-
+        for err in errors:
+            self._kerningValidationProblems.append(err)
 
     def save(self):
         """ Save the UFO."""
+        # validate the kerning to avoid failing surprises during save
         self.validateKerning()
+        # handle glyphs that were muted
+        for name in self.mutedGlyphsNames:
+            if name not in self.font: continue
+            if self.logger:
+                self.logger.info("removing muted glyph %s", name)
+            del self.font[name]
+            # XXX housekeeping:
+            # remove glyph from groups / kerning as well?
+            # remove components referencing this glyph?
         try:
             self.font.save(self.path, self.ufoVersion)
         except defcon.DefconError as error:

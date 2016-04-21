@@ -228,17 +228,22 @@ class DesignSpaceDocumentWriter(object):
             unicodeValue=None,
             location=None,
             masters=None,
-            note=None
+            note=None,
+            mute=False,
             ):
         """ Add a new glyph to the current instance. 
             * name: the glyph name. Required.
             * unicodeValue: unicode value for this glyph if it needs to be different from the unicode value associated with this glyph name in the masters.
             * location: a design space location for this glyph if it needs to be different from the instance location. 
             * masters: a list of masters and locations for this glyph if they need to be different from the masters specified for this instance.
+            * note: a note for this glyph
+            * mute: if this glyph is muted. None of the other attributes matter if this one is true.
         """
         if self.currentInstance is None:
             return
         glyphElement = ET.Element('glyph')
+        if mute:
+            glyphElement.attrib['mute'] = "1"
         if unicodeValue is not None:
             glyphElement.attrib['unicode'] = hex(unicodeValue)
         if location is not None:
@@ -342,6 +347,7 @@ class DesignSpaceDocumentReader(object):
             state:      'prep'      reading sources
                         'generate'  making instances
                         'done'      wrapping up
+                        'error'     reporting a problem
             
             action:     'start'     begin generating
                         'stop'      end generating
@@ -353,6 +359,20 @@ class DesignSpaceDocumentReader(object):
         """
         if self.progressFunc is not None:
             self.progressFunc(state=state, action=action, text=text, tick=tick)
+
+    def getSourcePaths(self, makeGlyphs=True, makeKerning=True, makeInfo=True):
+        """ Return a list of paths referenced in the document."""
+        tree = ET.parse(self.path)        
+        self.root = tree.getroot()
+        self.readVersion()
+        assert self.documentFormatVersion == 3
+        self.warpDict = None
+        # self.readWarp()
+        self.readSources()
+        paths = []
+        for name in self.sources.keys():
+            paths.append(self.sources[name][0].path)
+        return paths
 
     def process(self, makeGlyphs=True, makeKerning=True, makeInfo=True):
         """ Process the input file and generate the instances. """
@@ -606,19 +626,36 @@ class DesignSpaceDocumentReader(object):
         
         # save the instance. Done.
         success, report = instanceObject.save()
-        if not success: 
-                self.logger.info("Errors generating: %s", report)
-        if self.verbose:
-            failed = instanceObject.getFailed()
-            if failed:
-                failed.sort()
-                self.logger.info("Errors calculating %s glyphs:", len(failed))
-                self.logger.info(", ".join(failed))
-            missing = instanceObject.getMissingUnicodes()
-            if missing:
-                    missing.sort()
-                    self.logger.info("Missing unicodes for %s glyphs:", len(missing))
-                    self.logger.info(", ".join(missing))
+        if not success:
+            # report problems other than validation errors and failed glyphs
+            self.logger.info("%s:\nErrors generating: %s", filename, report)
+
+        # report failed glyphs
+        failed = instanceObject.getFailed()
+        if failed:
+            failed.sort()
+            msg = "%s:\nErrors calculating %s glyphs: \n%s"%(filename, len(failed),"\n".join(failed))
+            self.reportProgress('error', 'glyphs', msg)
+            if self.verbose:
+                self.logger.info(msg)
+
+        # report missing unicodes
+        missing = instanceObject.getMissingUnicodes()
+        if missing:
+            missing.sort()
+            msg = "%s:\nMissing unicodes for %s glyphs: \n%s"%(filename, len(missing),"\n".join(missing))
+            self.reportProgress('error', 'unicodes', msg)
+            if self.verbose:
+                self.logger.info(msg)
+
+        # report failed kerning pairs
+        failed = instanceObject.getKerningErrors()
+        if failed:
+            failed.sort()
+            msg = "%s:\nThese kerning pairs failed validation and have been removed:\n%s"%(filename, "\n".join(failed))
+            self.reportProgress('error', 'kerning', msg)
+            if self.verbose:
+                self.logger.info(msg)
 
         self.reportProgress("generate", 'stop', filenameTokenForResults)
 
@@ -674,6 +711,13 @@ class DesignSpaceDocumentReader(object):
         if glyphName is None:
             raise MutatorError("Glyph object without name attribute.")
         
+        # mute
+        mute = glyphElement.attrib.get("mute")
+        if mute == "1":
+            instanceObject.muteGlyph(glyphName)
+            # we do not need to stick around after this
+            return
+
         # unicode
         unicodeValue = glyphElement.attrib.get('unicode')
         if unicodeValue == None:
